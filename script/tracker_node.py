@@ -37,7 +37,6 @@ class TrackerNode:
         self.iou_thres = rospy.get_param("~iou_thres", 0.45)
         self.max_det = rospy.get_param("~max_det", 300)
         self.classes = rospy.get_param("~classes", None)
-        self.tracker = rospy.get_param("~tracker", "bytetrack.yaml")
         self.device = rospy.get_param("~device", None)
         self.result_conf = rospy.get_param("~result_conf", True)
         self.result_line_width = rospy.get_param("~result_line_width", None)
@@ -62,53 +61,68 @@ class TrackerNode:
         self.bridge = cv_bridge.CvBridge()
         self.use_segmentation = yolo_model.endswith("-seg.pt")
 
-    def image_callback(self, msg):
+    def image_callback(self, msg: Image):
         cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
-        results = self.model.track(
+        results = self.model.predict(
             source=cv_image,
             conf=self.conf_thres,
             iou=self.iou_thres,
             max_det=self.max_det,
             classes=self.classes,
-            tracker=self.tracker,
             device=self.device,
             verbose=False,
             retina_masks=True,
         )
 
-        if results is not None:
-            yolo_result_msg = YoloResult()
-            yolo_result_image_msg = Image()
-            yolo_result_msg.header = msg.header
-            yolo_result_image_msg.header = msg.header
-            yolo_result_msg.detections = self.create_detections_array(results)
-            yolo_result_image_msg = self.create_result_image(results)
-            if self.use_segmentation:
-                yolo_result_msg.masks = self.create_segmentation_masks(results)
-            self.results_pub.publish(yolo_result_msg)
-            self.result_image_pub.publish(yolo_result_image_msg)
+        if results is None or len(results) == 0:
+            return
+
+        yolo_result_msg = YoloResult()
+        yolo_result_image_msg = Image()
+
+        yolo_result_msg.header = msg.header
+        yolo_result_image_msg.header = msg.header
+
+        yolo_result_msg.detections = self.create_detections_array(results)
+        yolo_result_image_msg = self.create_result_image(results)
+
+        if self.use_segmentation:
+            yolo_result_msg.masks = self.create_segmentation_masks(results)
+
+        self.results_pub.publish(yolo_result_msg)
+        self.result_image_pub.publish(yolo_result_image_msg)
 
     def create_detections_array(self, results):
         detections_msg = Detection2DArray()
-        bounding_box = results[0].boxes.xywh
-        classes = results[0].boxes.cls
-        confidence_score = results[0].boxes.conf
+
+        res = results[0]
+        if res.boxes is None or len(res.boxes) == 0:
+            return detections_msg
+
+        bounding_box = res.boxes.xywh
+        classes = res.boxes.cls
+        confidence_score = res.boxes.conf
+
         for bbox, cls, conf in zip(bounding_box, classes, confidence_score):
             detection = Detection2D()
             detection.bbox.center.x = float(bbox[0])
             detection.bbox.center.y = float(bbox[1])
             detection.bbox.size_x = float(bbox[2])
             detection.bbox.size_y = float(bbox[3])
+
             hypothesis = ObjectHypothesisWithPose()
             hypothesis.id = int(cls)
             hypothesis.score = float(conf)
+
             detection.results.append(hypothesis)
             detections_msg.detections.append(detection)
+
         return detections_msg
 
     def create_result_image(self, results):
-        plotted_image = results[0].plot(
+        res = results[0]
+        plotted_image = res.plot(
             conf=self.result_conf,
             line_width=self.result_line_width,
             font_size=self.result_font_size,
@@ -121,13 +135,13 @@ class TrackerNode:
 
     def create_segmentation_masks(self, results):
         masks_msg = []
-        for result in results:
-            if hasattr(result, "masks") and result.masks is not None:
-                for mask_tensor in result.masks:
+        for res in results:
+            if hasattr(res, "masks") and res.masks is not None:
+                for mask_tensor in res.masks:
                     mask_numpy = (
-                        np.squeeze(mask_tensor.data.to("cpu").detach().numpy()).astype(
-                            np.uint8
-                        )
+                        np.squeeze(
+                            mask_tensor.data.to("cpu").detach().numpy()
+                        ).astype(np.uint8)
                         * 255
                     )
                     mask_image_msg = self.bridge.cv2_to_imgmsg(
